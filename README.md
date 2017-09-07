@@ -1,4 +1,4 @@
-# machinelearning
+# Fraud Detection with R, H2O and Auto-Encoders
 
 ## Summary
 This is an experiment in Machine Learning.  The aim is to improve me familarity with machine learning, allow me to get some practice with the available tools and see machine
