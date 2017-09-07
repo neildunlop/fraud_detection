@@ -1,10 +1,10 @@
 # machinelearning
 
---Summary
+## Summary
 This is an experiment in Machine Learning.  The aim is to improve me familarity with machine learning, allow me to get some practice with the available tools and see machine
 learning in action, warts and all.    
 
---The Tools
+## The Tools
 The repository contains an 'R' nodebook that can be viewed, executed and edited using R-Studio.
 
 The notebook allows you to have notes along side runnable code / script blocks and the results of that execution are embedded within the notebook.
@@ -14,7 +14,7 @@ misunderstood.  I've spent a long time learning how to do simple things in R and
 looking up what different terms mean.  I've spent more time than is decent trying to understand what different machine learning algorithms do and then trying to understand
 the maths behind them... I still dont really understand the maths but I mostly dont need to.
  
--The Experiment
+## The Experiment
 
 The experiment aims to correctly classify fraudulent and non-fraudent credit card transactions from a file of approximately 71000 transactions.  The data comes from a 'Kaggle'
 competition and is freely available for download.  I've probably added it to this repository already.
