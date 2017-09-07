@@ -1,0 +1,496 @@
+---
+title: "H2O AutoEncoder Anomaly Detection - Credit Card Fraud Dataset"
+output: html_notebook
+---
+
+Overview
+--------
+Credit card fraud is no small thing.  In 2015, annual credit card fraud cost the economy $21 billion.  That equates to about 12 cents stolen for every dollar spent.  As you might imagine, detecting credit card fraud is a high priority for a whole range of businesses.
+
+In this workshop we'll load a dataset, perform some quick analysis and then build a H2O autoencoder to help us spot fraudulent transactions in the dataset.
+
+The dataset we’re going to use can be downloaded from Kaggle. It contains data about credit card transactions that occurred during a period of two days, with 492 frauds out of 284,807 transactions.
+
+Put simply, we are trying to spot the transactions that are fraudulent, or put another way, we want to find the transactions that are not like the majority of the other non-fraudulent transactions.  In data science parlance we are trying to do outlier (or anomaly) detection.
+
+According to wikipedia anomaly detection is:
+
+"Anomaly detection (or outlier detection) is the identification of items, events or observations which do not conform to an expected pattern or other items in a dataset."
+
+Setup
+-----
+First we'll load a package that contains a collection of useful utilities that help us to analyse and visualise the data and two additional packages that allows us to summarise data.
+```{r}
+library("tidyverse")
+library("dplyr")
+library("plyr")
+```
+
+Next we manually download the dataset into the working folder for the project and then load it into R.
+```{r}
+# download from https://www.kaggle.com/dalpozz/creditcardfraud
+creditcard <- read.csv("data/creditcard.csv")
+```
+
+
+Examining the Data
+-------------------
+Before we do anything too significant, lets take a look at the data.  We can use the 'summary' function to give us a list of all the columns in the dataset and some basic statistical information about the data in those columns.  This isn't very useful right now, but it does show us there is a 'Time' column, a number of anonymised attributes about the transaction, the 'Class' of the transaction (Fraudulent or Non-Fraudulent) and the 'Amount' of the transaction, which is a cash value.  
+
+```{r}
+summary(creditcard)
+```
+
+The above 'summary' function should give us any null values but another way to list any rows where there is an attribute with a null value (marked as 'NA' in R) is to use the 'complete.cases' function.  We actually dont have any missing values in any of our rows.
+```{r}
+creditcard[!complete.cases(creditcard),]
+```
+
+
+Something a little more useful would be knowing how much of our dataset represents fraudulent transactions and how much of our data in non-fraudulent.  We can find this out using the 'table' function and tell it to group on the 'Class' attribute (aka column) and give us a count of how many rows in each group.
+```{r}
+#count(Class)
+table(creditcard$Class)
+```
+
+Just for the sake of completeness (and so we know how to do it), lets take a quick look at our data using a bar chart, just to get a feel for the shape of the data.  We'll use ggplot to make a simple chart.
+
+```{r}
+creditcard %>%
+  ggplot(aes(x = Class)) +
+    geom_bar(color = "lightblue", fill = "lightblue") +
+    labs( x = "Class of transaction", y = "Transaction count") +
+    scale_x_continuous(breaks = c(0, 1), labels = c("Non-Fraudulent", "Fraudulent")) +
+    scale_y_continuous(labels = scales::unit_format("k", 1e-3)) +
+    ggtitle("Credit Card Transactions") +
+    theme_light()
+```
+
+If you want to know more about formatting a ggplot take a look at this guide (http://www.hafro.is/~einarhj/education/ggplot2/scales.html)
+
+From this quick investigation we can see that we have a high unbalanced dataset and the instances of non-fraud massively outweigh the instances of fraud.  This could have implications for our machine learning model.
+
+Digging Deeper
+--------------
+Now we have a good overview of our dataset we can dig a little deeper.  I'm interested to know if there any obvious differences between the fraudulent and non-fraudulent transactions.  To make this comparison a little easier we'll split the data set into to two parts.
+
+```{r}
+fraud <- subset(creditcard, Class == 1)
+nonfraud <- subset(creditcard, Class == 0)
+```
+
+Once we've split our initial dataset into a distinct set for fraudulent transactions and another for non-fraudilent transactions we can take a look at the statistical summaries for these two sets.
+
+```{r}
+summary(nonfraud$Amount)
+```
+The statistics for the fraudulent transaction set look like:
+```{r}
+summary(fraud$Amount)
+```
+
+Fraud Values
+---
+Lets take a look at a chart of the fraud values:
+
+```{r}
+library(grid)
+
+fraudplot <- fraud %>%
+  ggplot(aes(x = Amount)) +
+    geom_histogram(color = "lightblue", fill = "lightblue", binwidth = 150) +
+    scale_x_continuous(name = "Amount ($)", limits=c(0,20000)) +
+    scale_y_continuous(name = "Fraud Transaction Count") +
+    theme_light()
+
+nonfraudplot <- nonfraud %>%
+  ggplot(aes(x = Amount)) +
+    geom_histogram(color = "lightblue", fill = "lightblue", binwidth = 150) +
+    scale_x_continuous(name = "Amount ($)", limits=c(0,20000)) +
+    scale_y_continuous(name = "Non-Fraud Transaction Count", trans="log10", limits = c(NA, NA), labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    theme_light()
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(fraudplot), ggplotGrob(nonfraudplot), size = "last"))
+```
+
+From this we can see that the fraudulent transactions are usually for a very small amount.  From this we can deduce that the value of a transaction alone isn't a good indicator of fraud.  So much for any theories we might have had that fraudsters were out buying speedboats and cars with your credit card!
+
+
+Time of Fraud
+---
+The original dataset does have 'Time' value but unfortunately this isn't the exact time of day that the transaction occurred.  This is actually the time in seconds between the recorded transaction and the first transaction in the dataset.  What we do know is that the dataset contains two days worth of transactions, but we dont know when the first transaction was.  Never the less, we can still example time element of the data to see if there is any pattern.
+
+Lets take a look at a chart of the fraud times (its not an absolute time, but lets see if there are any patterns):
+
+```{r}
+library(grid)
+
+fraudscatterplot <- fraud %>%
+  ggplot(aes(x = Time, y = Amount)) +
+    geom_point(color = "lightblue", fill = "lightblue") +
+    scale_y_continuous(name = "Amount ($)", limits=c(0,2000)) +
+    scale_x_continuous(name = "Tranaction Time (in seconds after start of dataset") +
+    ggtitle("Fraudulent Transactions") +
+    theme_light()
+
+nonfraudscatterplot <- nonfraud %>%
+  ggplot(aes(x = Time, y = Amount)) +
+    geom_point(color = "lightblue", fill = "lightblue") +
+    scale_y_continuous(name = "Amount ($)", limits=c(0,25000)) +
+    scale_x_continuous(name = "Transaction Time (in seconds after start of dataset") +
+    ggtitle("Non-Fraudulent Transactions") +
+    theme_light()
+
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(fraudscatterplot), ggplotGrob(nonfraudscatterplot), size = "last"))
+```
+
+To be honest, there doesn't look to be any significant pattern in this plot that we can pull out.  The data is also not as useful as it could be because we can't say whether the transactions link to any particular time of day.  We dont know if the dataset starts at midnight one day for example, so its difficult to deduce anything meaningful.
+
+Starting Machine Learning
+-------------------------
+Now its time to start Machine Learning.  We'll use the H2O package and an autoencoder to do some machine learning.  We'll try and train a model to spot fraudulent transactions for us.  The first step is to declare the 'h2o' library and initialise the package.
+
+```{r}
+library(h2o)
+
+# tell h2o its free to use all processors, otherwise it will default to 2.
+h2o.init(nthreads = -1)
+
+# setup a clean slate, just in case there is anything left over from previous uses.
+h2o.removeAll()
+
+```
+
+H2O works with 'DataFrames' which are simply 2D arrays of data.  To convert our data into a dataframe we use a build in method:
+
+```{r}
+#convert our dataset into a h20 dataframe so we can process it
+creditcard_frame <- as.h2o(creditcard)
+```
+Once we have loaded our dataframe into H2O we can take a look at the data.  The h2o 'describe' function is much like the R 'summary' method but arguably a bit easier to read and possibly a bit more descriptive.
+
+```{r}
+h2o.describe(creditcard_frame)
+```
+
+Building Training and Test Data Sets
+------------------------------------
+
+Once we have our dataframe loaded we need to split it into a training and test set.  Our 'training' set will be used to train our machine learning model.  We then run the 'test' data set through that model and we can then compare what the model produced (which transactions it thinks are fraudulent) and what our test data set actually contains.  
+
+```{r}
+# Split dataset giving the training dataset 75% of the data
+creditcard_split <- h2o.splitFrame(data=creditcard_frame, ratios= c(0.75))
+
+# Create a training set from the 1st dataset in the split
+creditcard_train <- creditcard_split[[1]]
+
+# Create a test set from the 2st dataset in the split
+creditcard_test <- creditcard_split[[2]]
+
+# set a variable to remember the name of the column that holds our output value
+ response <- "Class"
+
+# set a variable to remember the names of the columns we want our machine learning model to consider - EXECPT the output
+# (we remove the output column.. obviously the model would figure out that 'Class' is the biggest indicator of class..)
+ features <- setdiff(colnames(creditcard_train), response)
+```
+
+
+
+
+Building our Model
+------------------
+<AUTOENCODERS ARE UNSUPERVISED>
+Ok, time to use our fancy H2O package and some autoencoders to build a model.
+
+Its the parameters that are important here.
+Each model has exactly one input layer, a number of hidden layers and one output layer.
+The number of neurons in the input layer should match the number of attributes in your dataset.  In our case this is 31 (but we might take of Time?).
+
+The number of neurons in the output layer depends on the configuration of your model.  We will be running in 'machine' mode where we expect our model to output a classification label for each transaction (to mark it as fraudulent or not).  If we are running in 'regression' mode then the model will return a number (like when we want to predict the value of a transaction for example).  
+
+Knowing the number of hidden layers we need is frankly complicated.  It seems like the accepted thinking is that one hidden layer is sufficient for most problems.  You can add more layers which should improve accuracy but it has a big impact on performance.  The number of neurons in the hidden layer but a rule of thumb seems to the mean of the number of neurons in the input and output layers.  In our case (31+1)/2=16.
+(See this for more info: https://stats.stackexchange.com/questions/181/how-to-choose-the-number-of-hidden-layers-and-nodes-in-a-feedforward-neural-netw)
+
+Setting the seed ensures that when the model runs we all see the same output.  In production you would remove this parameter and the seed would be randomised.
+
+*Hidden* allows us to specify the number of hidden layers and how many nodes are in each layer.  In our case, we have one hidden layer with 2 neurons.
+*Epochs* allows us to define how many passes we will be made over the training data set.
+*Activation* - to be honest... dont know - Tahn is recommended as the best for autoencoder.
+
+Lets try the simplest possible Autoencoder - we'll have just 2 nodes in our autoencoder to really force our encoder to summarise the characteristics of the dataset.  This is know as a 'bottleneck' model and is a good starting point and is also good because we can plot the output on a chart.
+
+```{r} 
+# fire up the autoencoder and feed it the training frame and tell it to use all column EXECPT the class (which is what we want to predict)
+fraud_detection_bottleneck_model <- h2o.deeplearning(
+                                     x = features, 
+                                     training_frame = creditcard_train,
+                                     model_id = "fraud_detection_bottleneck_model",
+                                     hidden = c(10,2,10), 
+                                     autoencoder = TRUE, 
+                                     reproducible = TRUE,
+                                     seed = 1234,
+                                     activation = "Tanh")
+```
+
+model_nn <- h2o.deeplearning(x = features,
+                             training_frame = train_unsupervised,
+                             model_id = "model_nn",
+                             autoencoder = TRUE,
+                             reproducible = TRUE, #slow - turn off for real problems
+                             ignore_const_cols = FALSE,
+                             seed = 42,
+                             hidden = c(10, 2, 10), 
+                             epochs = 100,
+                             activation = "Tanh")
+
+
+Checking our Model
+------------------
+Now we have a model, we really want to know how good it is at reconstructing data from an input.  If our model can take an input, process it and produce an output that perfectly matches the input, then it is a perfect model.  *Spoiler alert* - the model won't be perfect, ever.  What we are trying to create is a model that is as accurate as possible and thats where the science bit of Data Science comes in.
+
+Helpfully H2O contains an 'anomaly' function that allows us to reconstruct the original data set using a reduced set of features and calculate a Mean Squared Error between the original and what the model produced.  The lower the MSE is, the better the model is (although a really low MSE is probably a lie and the model has 'overfitted' - which means its basically just learnt the training data and not managed to create a good general model.  It will predict the training data perfectly every time but if you give it new data its not seen before, it will just get things wrong).
+
+I THINK THE IDEA MAY BE THAT IF OUR MODEL CANNOT RECONSTRUCT THE ROW THEN IT WILL HAVE A HIGH MSE.  WHEN WE RUN DATA THROUGH THE MODEL, IF THE MSE IS HIGH THEN THE TRANSACTION IS PROBABLY FRAUDULENT?
+
+Note that the 'per_feature' setting can be set to true and the function will calculate the MSE for every feature of every row.  By looking at these we can see if there is a feature that the model is really good or really bad at reconstructing.  For now we will leave this set to false because we are more interested in the MSE of each row as a whole)
+
+```{r}
+# not sure if I should use the train data set or the test data set - I assume the train set for starters
+credit_card_anomalies = h2o.anomaly(fraud_detection_bottleneck_model, creditcard_train, per_feature=FALSE)
+
+# show me a same of the first few rows of data
+head(credit_card_anomalies)
+```
+
+The table of Mean Standard Errors per row is helpful but its difficult to see whats going on.  Lets convert the reconstruction anomaly data into a dataframe that R can work with and plot a chart.
+
+```{r}
+# convert the anomaly data into an R dataframe
+reconstruction_errors <- as.data.frame(credit_card_anomalies)
+
+# plot a simple chart of the sorted reconstruction errors MSE's
+plot(sort(reconstruction_errors$Reconstruction.MSE), main='Reconstruction Error')
+```
+
+<This is speculation - its what I THINK this chart tells me - need to up the resolution really to be more accurate>
+=====
+From this plot it looks like the vast majority of our data can be reconstructed well.  Over 200,000 rows of data can be reconstructed really well (we know this because the MSE is low).  The errors ramp up sharply towards the right of the graph.  This means that we could probably say that any row with a MSE lower than 0.02 is accurate.. and that would cover a very large proportion of our dataset.  In short, this chart shows there is a pretty clear line between rows that can accurately reconstructed and those that can't.. and the vast majority of rows can be accurately reconstructed.
+
+A quick way of viewing the MSE for the model is:
+Now we'll take a look at how well this model did at learning:
+```{r}
+   #show the 'mean squared error' for the model as a  whole
+   h2o.mse(fraud_detection_bottleneck_model)
+```
+
+Side Exercise:
+We could then trim our training data set to just contain the rows where the model is able to identify a clear pattern.  We can then retrain our model using the smaller data set that it is better able to handle (those with a MSE < 0.02).  This will improve the accuracy of the model.  We can then make another model with the tricker rows (where MSE >=0.02) and then combine the two models for a better combined model.  See http://amunategui.github.io/anomaly-detection-h2o/ for more info.
+
+
+Using our model on test data
+====
+
+Now that we have a trained model we really want to test it out and compare what the model says with what our test data set actually tells us (remember that our test data set contains the Class field that will tell us explicitly whether the transaction was identified as fraud).  What we are aiming to do is to see if a high MSE is a good indication of fraud (I THINK).
+
+```{r}
+# use the model to spot anomalies in our TEST data set
+test_credit_card_anomalies = h2o.anomaly(fraud_detection_bottleneck_model, creditcard_test, per_feature=FALSE)
+
+# convert the results to a dataframe that R can use
+test_reconstruction_errors <- as.data.frame(test_credit_card_anomalies)
+head(test_reconstruction_errors)
+
+# plot a simple chart of the sorted reconstruction errors MSE's for the test data.. just for comparison with our training set
+plot(sort(test_reconstruction_errors$Reconstruction.MSE), main='Reconstruction Error')
+
+
+
+#test_reconstruction_errors <- test_reconstruction_errors %>%
+#  tibble::rownames_to_column() %>%
+#  mutate(Class = as.vector(creditcard_test[, 31]))
+
+# take a peek at the table of data we've just made to hold information about every prediction combined with the original value 
+# of class in the original test dataset (ie, we now have a mapping of MSE to Fraud/Not Fraud)
+#head(test_reconstruction_errors)
+
+#mean_mse <- test_reconstruction_errors %>%
+#  group_by(Class) %>%
+#  summarise(mean = mean(Reconstruction.MSE))
+
+
+anomaly <- h2o.anomaly(fraud_detection_bottleneck_model, creditcard_test) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column() %>%
+  mutate(Class = as.vector(creditcard_test[, 31]))
+
+# create a dataframe containing the mean MSE for each of our transaction types (so we can plot it on a graph)
+mean_mse <- anomaly %>% 
+  group_by(Class) %>% 
+  dplyr::summarise(mean = mean(Reconstruction.MSE))
+
+# take a look at our mean MSE's - cos we're curious
+head(mean_mse)
+```
+
+
+
+We can now plot this
+
+```{r}
+ggplot(anomaly, aes(x = as.numeric(rowname), y = Reconstruction.MSE, color = as.factor(Class))) +
+  geom_point(alpha = 0.3) +
+  geom_hline(data = mean_mse, aes(yintercept = mean, color = as.factor(Class))) +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "transaction number",
+       color = "Class")
+```
+
+From the plot we can see that the mean MSE for fraudulent transactions is significantly higher than the mean MSE for non-fraudulent transactions.  The good news is that it seems like our model struggles to reconstruct fraudulent transactions and because of this they have a higher MSE.  The bad news is that while it does look like *most* of the transactions above the fradulent mean MSE (around 0.02) are actually fraudulent there are still a few which are non-fraudulent and there are still fraudulent transactions below the mean MSE.
+
+We were hoping that we could simply say "anything with a MSE >0.02 is fraudulent and anything less than that is non-fraudulent".  Sadly, it not that clear cut.  Its not a bad first attempt but we would still miss some fraudulent transactions and we'd get a few false positives.
+
+
+Improving our Model
+---
+The autoencoder has done a reasonable job of modelling.  To improve things we can use that model as an input for a supervised deep learning model.
+
+https://github.com/h2oai/h2o-3/blob/master/h2o-r/tests/testdir_algos/deeplearning/runit_deeplearning_autoencoder_large.R
+
+OR
+
+https://shiring.github.io/machine_learning/2017/05/01/fraud
+
+
+```{r}
+
+# our target column to hold the model prediction (in the response variable in our case must be of type 'factor' and not a numeric type so we need to convert it before we run the model to do predictions)
+creditcard_test[,response] <- as.factor(creditcard_test[,response])
+
+# use the autoencoder model as pre-training for a supervised model - uses weights from the autoencoder for model fitting(??)
+supervised_credit_model <- h2o.deeplearning(y = response,
+                               x = features,
+                               training_frame = creditcard_test,
+                               pretrained_autoencoder  = "fraud_detection_bottleneck_model",
+                               reproducible = TRUE, #slow - turn off for real problems
+                               balance_classes = TRUE,
+                               ignore_const_cols = FALSE,
+                               seed = 42,
+                               hidden = c(10,2,10), 
+                               epochs = 100,
+                               activation = "Tanh")
+
+# show the details of the model - we should really have a supervised set of data from the original split but I'm lazy - and I'm not sure what I'm looking for in these numbers
+supervised_credit_model
+
+```
+
+Now that we have a new model, we can make some predictions
+
+```{r}
+#  run our test data through the model and make some predictions, then add an extra column called 'actual' that merges in the values from the original test data set so we can compare the predictions with the actual.
+predictions <- as.data.frame(h2o.predict(object = supervised_credit_model, newdata = creditcard_test)) %>%
+  mutate(actual = as.vector(creditcard_test[, 31]))
+
+head(predictions)
+```
+```{r}
+nrow(creditcard_test)
+```
+
+To make it a bit easier to see how our predictions compared to the actual results, we'll do a little summarisation
+
+```{r}
+table(predictions$actual)
+#table(predictions$predict, predictions$actual)
+
+#118 cases of fraud in our original dataset - our model says there are 1197  (REALLY BAD!)
+#71008 cases of non-fraud in our original dataset - our model says there are 69929 (REALLY BAD!)
+
+predictions %>%
+  group_by(actual, predict) %>%
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = n / sum(n)) 
+```
+
+This says that we identified 99.7% of the non-fraud cases correctly.
+We mis-identified 0.1% of non-fraudulent transactions as fraud.
+We correctly identified 100% of fraud cases correctly!
+We did not mis-identify any fraud cases as non-fraud
+
+
+Lets plot a chart
+```{r}
+predictions %>%
+  ggplot(aes(x = actual, fill = predict)) +
+    geom_bar() +
+    theme_bw() +
+    scale_fill_brewer(palette = "Set1") +
+    facet_wrap( ~ actual, scales = "free", ncol = 2)
+```
+
+Not good.. our model sucks!
+
+TODO: Train the models with 10-2-10 hidden layer and split the data into test/train/supervise with 0.4,0.4,0.2 split.  The predict should be done on the supervise set.
+
+
+
+
+
+
+
+
+
+Making Predictions
+---
+Its all well and good to tweak the model and produce measures of its accuracy but how do we actually use the model to make predictions?
+
+
+
+
+
+
+fraud_detection_bottleneck_model <- h2o.deeplearning(
+                                     x = features, 
+                                     training_frame = creditcard_train,
+                                     hidden = c(2), 
+                                     autoencoder = TRUE, 
+                                     reproducible = TRUE,
+                                     seed = 1234,
+                                     activation = "Tanh")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+General Notes
+-------------
+*MSE* - Mean Squared Error. The “squared” bit means the bigger the error, the more it is punished. If your correct answers are 2,3,4 and your algorithm guesses 1,4,3, the absolute error on each one is exactly 1, so squared error is also 1, and the MSE is 1. But if your algorithm guesses 2,3,6, the errors are 0,0,2, the squared errors are 0,0,4, and the MSE is a higher 1.333.
+
+*AUC* - Is 'Area Under Curve' but it tells us how accurate a prediction is from a model.  0.5 is the same as random chance and 1 is the value if the prediction is perfect.  Essentially we can calcuate an AUC for our model and we would like it to be as high as possible.  AUC gives us a way of comparing models.
+
+
+
